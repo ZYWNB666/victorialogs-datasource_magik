@@ -1,0 +1,219 @@
+name: release
+
+on:
+  workflow_dispatch:
+    ref: main
+    branches:
+      - main
+    permissions:
+      teams:
+        - development
+    inputs:
+      run_security_scan:
+        description: 'Run security vulnerability scan'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  security-scan:
+    name: Security Vulnerability Scan
+    if: ${{ inputs.run_security_scan == true }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      has_high_vulns: ${{ steps.check-severity.outputs.has_high_vulns }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Run OSV Scanner
+        id: osv-scan
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@v2.3.3
+        with:
+          scan-args: |-
+            --format=json
+            --output=osv-results.json
+            --recursive
+            ./
+
+      - name: Check vulnerability severity
+        id: check-severity
+        run: |
+          if [ -f osv-results.json ]; then
+            high_critical=$(grep -o '"severity"[[:space:]]*:[[:space:]]*"\(HIGH\|CRITICAL\)"' osv-results.json | wc -l | tr -d ' ')
+            if [ "$high_critical" -gt 0 ]; then
+              echo "has_high_vulns=true" >> $GITHUB_OUTPUT
+              echo "❌ Found $high_critical HIGH/CRITICAL vulnerabilities"
+              exit 1
+            else
+              echo "has_high_vulns=false" >> $GITHUB_OUTPUT
+              echo "✅ No HIGH/CRITICAL vulnerabilities found"
+            fi
+          else
+            echo "has_high_vulns=false" >> $GITHUB_OUTPUT
+            echo "✅ No vulnerabilities found"
+          fi
+
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: osv-scan-results
+          path: osv-results.json
+
+  release:
+    name: Release on GitHub
+    runs-on: ubuntu-latest
+    needs: security-scan
+    if: ${{ always() && (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') }}
+    outputs:
+      PKG_TAG: ${{ env.PKG_TAG }}
+    permissions:
+      packages: write
+      contents: write
+      pages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore binaries from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ./bin
+          key: binary
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+      - name: Setup node caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.VM_BOT_GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.VM_BOT_PASSPHRASE }}
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+      - name: Prepare release notes if tag not exists
+        env:
+          GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
+        run: |
+          export PKG_TAG="v$(yq -r '.version' package.json)"
+          if git show-ref --tags --verify --quiet "refs/tags/${TAG}"; then
+            echo "Tag ${PKG_TAG} exists, skipping release"
+          else
+            echo "PKG_TAG=$PKG_TAG" >> $GITHUB_ENV
+            echo "Tag ${PKG_TAG} does not exist, pushing a new one"
+            if ! grep -q "^## tip$" CHANGELOG.md; then
+              echo "ERROR: Not found 'tip' section in CHANGELOG. Please add relavant entries and recreate git tag"
+              exit 1
+            fi
+            sed -n '/## tip/,/## /p' CHANGELOG.md | sed -e '$d' -e '1d' > NOTES.md
+            sed -i 's/## tip/&\n\n## '${PKG_TAG}'/' CHANGELOG.md
+            make vl-plugin-check
+            git tag ${TAG}
+            git push origin ${TAG}
+          fi
+      - name: Generate artifact attestation
+        if: ${{ hashFiles('NOTES.md') != '' }}
+        id: attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/victoriametrics-logs-datasource-${{ env.PKG_TAG }}.zip
+      - name: Prapare binary cache
+        if: ${{ hashFiles('NOTES.md') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ./bin
+          key: binary
+      - name: Upload release assets
+        if: ${{ hashFiles('NOTES.md') != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Check attestation details at: ${{ steps.attestation.outputs.attestation-url }}"
+          gh release create ${{ env.PKG_TAG }} \
+            --title=${{ env.PKG_TAG }} \
+            --notes-file=NOTES.md ./dist/*
+      - name: Automatic changelog update
+        if: ${{ hashFiles('NOTES.md') != '' }}
+        run: |
+          rm -rf NOTES.md
+          export CL_BRANCH="changelog-update-$(date +%s)"
+          git checkout -b "${CL_BRANCH}"
+          git add CHANGELOG.md
+          git commit -S -m "Automatic CHANGELOG update"
+          git push origin ${CL_BRANCH}
+          gh pr create \
+            -H $(git branch --show-current) \
+            -t "Automatic CHANGELOG update" \
+            -b "Automatic CHANGELOG update"
+        env:
+          GH_TOKEN: "${{ secrets.VM_BOT_GH_TOKEN }}"
+          GITHUB_TOKEN: "${{ secrets.VM_BOT_GH_TOKEN }}"
+
+  update-issues:
+    name: Update Issues for Release
+    runs-on: ubuntu-latest
+    needs: release
+    if: ${{ needs.release.outputs.PKG_TAG != '' }}
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Update issues with waiting for release label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="${{ needs.release.outputs.PKG_TAG }}"
+          REPO="${{ github.repository }}"
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${RELEASE_TAG}"
+          
+          # Find all open issues with 'waiting for release' label
+          ISSUES=$(gh issue list \
+            --repo ${REPO} \
+            --label "waiting for release" \
+            --state open \
+            --json number,author \
+            --jq '.[] | "\(.number)|\(.author.login)"')
+          
+          if [ -z "$ISSUES" ]; then
+            echo "No issues found with 'waiting for release' label"
+            exit 0
+          fi
+          
+          # Process each issue
+          echo "$ISSUES" | while IFS='|' read -r ISSUE_NUMBER AUTHOR; do
+            echo "Processing issue #${ISSUE_NUMBER}"
+            
+            # Remove 'waiting for release' label
+            gh issue edit ${ISSUE_NUMBER} \
+              --repo ${REPO} \
+              --remove-label "waiting for release"
+            
+            # Add 'waiting for publish' label
+            gh issue edit ${ISSUE_NUMBER} \
+              --repo ${REPO} \
+              --add-label "waiting for publish"
+            
+            # Post comment
+            gh issue comment ${ISSUE_NUMBER} \
+              --repo ${REPO} \
+              --body "@${AUTHOR} Your issue has been included in release [${RELEASE_TAG}](${RELEASE_URL}). The plugin is now waiting for publication to the Grafana store."
+            
+            echo "Successfully updated issue #${ISSUE_NUMBER}"
+          done

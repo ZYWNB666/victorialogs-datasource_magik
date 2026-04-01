@@ -1,0 +1,194 @@
+import { DataFrame, DataSourceJsonData, KeyValue, QueryEditorProps } from '@grafana/data';
+import { BackendSrvRequest } from '@grafana/runtime';
+import { DataQuery } from '@grafana/schema';
+
+import { LogLevelRule } from './configuration/LogLevelRules/types';
+import { VictoriaLogsDatasource } from './datasource';
+
+export interface Options extends DataSourceJsonData {
+  maxLines?: string;
+  httpMethod?: string;
+  customQueryParameters?: string;
+  queryBuilderLimits?: QueryBuilderLimits;
+  derivedFields?: DerivedFieldConfig[];
+  // alertmanager?: string;
+  // keepCookies?: string[];
+  // predefinedOperations?: string;
+  enableSecureSocksProxy?: boolean;
+  logLevelRules?: LogLevelRule[];
+  multitenancyHeaders?: Partial<Record<TenantHeaderNames, string>>;
+  vmuiUrl?: string;
+}
+
+export const QUERY_DIRECTION = {
+  asc: 'asc',
+  desc: 'desc',
+} as const;
+export type QueryDirection = (typeof QUERY_DIRECTION)[keyof typeof QUERY_DIRECTION];
+
+export enum SupportingQueryType {
+  DataSample = 'dataSample',
+  LogsSample = 'logsSample',
+  LogsVolume = 'logsVolume',
+}
+
+export enum QueryType {
+  Instant = 'instant', // /select/logsql/query
+  Stats = 'stats', // /select/logsql/stats_query
+  StatsRange = 'statsRange', // /select/logsql/stats_query_range
+  Hits = 'hits', // /select/logsql/hits
+}
+
+export enum QueryEditorMode {
+  Builder = 'builder',
+  Code = 'code',
+}
+
+export type Format = 'histogram';
+
+export type StreamFilterOperator = 'in' | 'not_in';
+
+export interface StreamFilterState {
+  label: string;
+  operator: StreamFilterOperator;
+  values: string[];
+}
+
+export interface Query extends DataQuery {
+  editorMode?: QueryEditorMode;
+  expr: string;
+  legendFormat?: string;
+  maxLines?: number;
+  step?: string;
+  extraFilters?: string;
+  /** serialized stream filters for extra_stream_filters query param (set during applyTemplateVariables) */
+  extraStreamFilters?: string;
+  /** stream filters stored as structured data, serialized to extraStreamFilters before request */
+  streamFilters?: StreamFilterState[];
+  direction?: QueryDirection;
+  supportingQueryType?: SupportingQueryType;
+  queryType?: QueryType;
+  /** for /select/logsql/query */
+  interval?: string;
+  /** groups the results by the specified field value for /select/logsql/hits */
+  fields?: string[];
+  /** timezone offset for bucket alignment in stats_query_range and hits endpoints (e.g. "2h", "-5h30m") */
+  timezoneOffset?: string;
+  /** if true, adhoc filters will be applied as the root filter, otherwise as an extra_filters */
+  isApplyExtraFiltersToRootQuery?: boolean;
+  /** shows which format of data is used */
+  format?: Format;
+}
+
+export type VictoriaLogsQueryEditorProps = QueryEditorProps<VictoriaLogsDatasource, Query, Options>;
+
+export type DerivedFieldConfig = {
+  matcherRegex: string;
+  name: string;
+  url?: string;
+  urlDisplayLabel?: string;
+  datasourceUid?: string;
+  matcherType?: 'label' | 'regex';
+};
+
+export type QueryFilterOptions = KeyValue<string>;
+
+export enum FilterActionType {
+  FILTER_FOR = 'FILTER_FOR',
+  FILTER_OUT = 'FILTER_OUT',
+}
+
+export interface ToggleFilterAction {
+  type: FilterActionType;
+  options: QueryFilterOptions;
+  frame?: DataFrame;
+}
+
+export interface FilterVisualQuery {
+  values: (string | FilterVisualQuery)[];
+  operators: string[];
+}
+
+export interface PipeVisualQuery {
+  type: string;
+  args: string[];
+}
+
+/** Type of line filter operation */
+export enum LineFilterType {
+  /** Line contains (case sensitive) - _msg:"text" */
+  Contains = 'contains',
+  /** Line does not contain (case sensitive) - _msg:!"text" */
+  NotContains = 'not_contains',
+  /** Line contains case insensitive - _msg:~"(?i)text" */
+  ContainsCaseInsensitive = 'contains_case_insensitive',
+  /** Line does not contain case insensitive - _msg:!~"(?i)text" */
+  NotContainsCaseInsensitive = 'not_contains_case_insensitive',
+  /** Line contains regex match - _msg:~"regex" */
+  RegexMatch = 'regex_match',
+  /** Line does not match regex - _msg:!~"regex" */
+  RegexNotMatch = 'regex_not_match',
+  /** IP line filter expression - _msg:ip("ip_range") */
+  IpFilter = 'ip_filter',
+}
+
+/** _msg filter condition for text search */
+export interface MsgFilterCondition {
+  /** the text to search for */
+  text: string;
+  /** type of line filter operation */
+  type: LineFilterType;
+  /** @deprecated use type instead. whether to include or exclude the text (true = contains, false = not contains) */
+  contains?: boolean;
+}
+
+export interface VisualQuery {
+  filters: FilterVisualQuery;
+  pipes: string[]; //PipeVisualQuery[];
+  /** _msg filter conditions for text search */
+  msgFilters: MsgFilterCondition[];
+}
+
+export interface RequestArguments {
+  url: string;
+  params?: Record<string, string>;
+  options?: Partial<BackendSrvRequest>;
+}
+
+export interface FieldHitsResponse {
+  values: FieldHits[];
+}
+
+export interface FieldHits {
+  value: string;
+  hits: number;
+}
+
+export enum FilterFieldType {
+  FieldName = 'fieldName',
+  FieldValue = 'fieldValue'
+}
+
+export interface VariableQuery extends DataQuery {
+  type: FilterFieldType;
+  query?: string;
+  field?: string;
+  limit?: number;
+}
+
+export type QueryBuilderLimits = {
+  [FilterFieldType.FieldValue]?: number;
+  [FilterFieldType.FieldName]?: number;
+};
+
+export enum TenantHeaderNames {
+  AccountID = 'AccountID',
+  ProjectID = 'ProjectID',
+}
+
+export type MultitenancyHeaders = Record<TenantHeaderNames, string>;
+
+export type Tenant = {
+  account_id: string;
+  project_id: string;
+};

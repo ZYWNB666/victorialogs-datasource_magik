@@ -1,0 +1,76 @@
+name: check / backend
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/pr-checks-backend.yml'
+      - 'go.*'
+      - 'vendor/**'
+      - 'pkg/**'
+      - '**/Makefile'
+      - '**/Magefile.go'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/pr-checks-backend.yml'
+      - 'go.*'
+      - 'vendor/**'
+      - 'pkg/**'
+      - '**/Makefile'
+      - '**/Magefile.go'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v4
+      - name: Restore binaries from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ./bin
+          key: binary
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+      - name: Dependencies
+        run: |
+          make check-all
+          git diff --exit-code
+      - name: Prapare binary cache
+        uses: actions/cache@v4
+        with:
+          path: ./bin
+          key: binary
+  test:
+    needs: lint
+    strategy:
+      matrix:
+        scenario: ["golang-test", "golang-test-race"]
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+      - name: run tests
+        run: |
+          make ${{ matrix.scenario }}
