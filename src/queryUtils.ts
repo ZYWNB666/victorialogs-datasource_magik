@@ -30,12 +30,18 @@ export function getStringsFromLineFilter(filter: SyntaxNode): SyntaxNode[] {
   return nodes;
 }
 
+const unescapeQueryValue = (value: string): string => {
+  return value
+    .replace(/\\(["'])/g, '$1')
+    .replace(/\\\\/g, '\\');
+};
+
 export function getHighlighterExpressionsFromQuery(input = ''): string[] {
   const results = [];
 
-  // Extract _msg filter values for highlighting
-  // Match patterns like _msg:"value" or _msg:value or _msg:!="value"
-  const msgFilterRegex = /_msg\s*:\s*(!~|!=|~|=)?\s*("[^"]*"|'[^']*'|\S+)/gi;
+  // Extract _msg filter values for highlighting.
+  // Supports escaped quotes inside quoted strings, e.g. _msg:~"\\"start_time".
+  const msgFilterRegex = /_msg\s*:\s*(!~|!=|!|~|=)?\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/gi;
   let match;
   while ((match = msgFilterRegex.exec(input)) !== null) {
     let value = match[2];
@@ -50,10 +56,10 @@ export function getHighlighterExpressionsFromQuery(input = ''): string[] {
       const operator = match[1] || '';
       if (operator === '~' || operator === '!~') {
         // Regex pattern - use as-is but unescape
-        results.push(value.replace(/\\\\/g, '\\'));
+        results.push(unescapeQueryValue(value));
       } else {
-        // Exact or word match - escape regex special chars
-        results.push(escapeRegExp(value));
+        // Exact or word match - unescape and escape regex special chars
+        results.push(escapeRegExp(unescapeQueryValue(value)));
       }
     }
   }

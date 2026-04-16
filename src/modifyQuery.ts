@@ -86,7 +86,7 @@ export const removeLabelFromQuery = (query: string, key: string, value: string, 
 
   keyValues.forEach(keyValue => recursiveRemove(filters, keyValue));
 
-  return parseVisualQueryToString({ filters, pipes });
+  return parseVisualQueryToString({ filters, pipes, msgFilters: [], msgFilterOperators: [] });
 };
 
 const recursiveRemove = (filters: FilterVisualQuery, keyValue: string): boolean => {

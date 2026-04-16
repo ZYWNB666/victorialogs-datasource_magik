@@ -1,7 +1,7 @@
 ARG grafana_version=latest
-ARG grafana_image=grafana-enterprise
+ARG grafana_base_image=grafana/grafana-enterprise
 
-FROM grafana/${grafana_image}:${grafana_version}
+FROM ${grafana_base_image}:${grafana_version}
 
 ARG anonymous_auth_enabled=true
 ARG development=false

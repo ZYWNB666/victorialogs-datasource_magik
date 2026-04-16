@@ -12,6 +12,7 @@ import {
   DataSourceInstanceSettings,
   DataSourceWithLogsContextSupport,
   DEFAULT_FIELD_DISPLAY_VALUES_LIMIT,
+  FieldType,
   Labels,
   LegacyMetricFindQueryOptions,
   LiveChannelScope,
@@ -49,6 +50,8 @@ import {
   queryHasFilter,
   removeLabelFromQuery,
 } from './modifyQuery';
+import { buildVisualQueryFromString, splitExpression } from './components/QueryEditor/QueryBuilder/utils/parseFromString';
+import { parseVisualQueryToString } from './components/QueryEditor/QueryBuilder/utils/parseToString';
 import { removeDoubleQuotesAroundVar } from './parsing';
 import { replaceOperatorWithIn, returnVariables } from './parsingUtils';
 import { transformBackendResult } from './transformers';
@@ -56,6 +59,7 @@ import {
   DerivedFieldConfig,
   FilterActionType,
   FilterFieldType,
+  FilterVisualQuery,
   MultitenancyHeaders,
   Options,
   Query,
@@ -77,6 +81,18 @@ export const REF_ID_STARTER_LOG_SAMPLE = 'log-sample-';
 export const REF_ID_STARTER_LOG_CONTEXT_REQUEST = 'log-context-request-';
 export const REF_ID_STARTER_LOG_CONTEXT_QUERY = 'log-context-query-';
 export const LABEL_STREAM_ID = '_stream_id';
+export const DEFAULT_MAX_LINES = 1000;
+export const MAX_QUERY_MAX_LINES = 10000;
+export const DEFAULT_LOG_CONTEXT_MAX_LINES = 100;
+export const MAX_LOG_CONTEXT_MAX_LINES = 1000;
+export const DEFAULT_LOG_CONTEXT_WINDOW_MS = 5 * 60 * 1000;
+export const MAX_LOG_CONTEXT_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+const clampPositiveInt = (value: number | undefined, fallback: number, max: number): number => {
+  const normalized = Number.isFinite(value) ? Math.trunc(value as number) : NaN;
+  const candidate = normalized > 0 ? normalized : fallback;
+  return Math.min(candidate, max);
+};
 
 export class VictoriaLogsDatasource
   extends DataSourceWithBackend<Query, Options>
@@ -109,7 +125,7 @@ export class VictoriaLogsDatasource
     this.basicAuth = instanceSettings.basicAuth;
     this.withCredentials = instanceSettings.withCredentials;
     this.httpMethod = settingsData.httpMethod || 'POST';
-    this.maxLines = parseInt(settingsData.maxLines ?? '0', 10) || 1000;
+    this.maxLines = clampPositiveInt(parseInt(settingsData.maxLines ?? '0', 10), DEFAULT_MAX_LINES, MAX_QUERY_MAX_LINES);
     this.derivedFields = settingsData.derivedFields || [];
     this.customQueryParameters = new URLSearchParams(settingsData.customQueryParameters);
     this.languageProvider = languageProvider ?? new LogsQlLanguageProvider(this);
@@ -131,7 +147,7 @@ export class VictoriaLogsDatasource
           ...q,
           // to backend sort for limited data to show first logs in the selected time range if the user clicks on the sort button
           expr: addSortPipeToQuery(q, request.app, request.liveStreaming),
-          maxLines: q.maxLines ?? this.maxLines,
+          maxLines: clampPositiveInt(q.maxLines, this.maxLines, MAX_QUERY_MAX_LINES),
           timezoneOffset,
           format: getQueryFormat(q.expr),
           step: this.templateSrv.replace(q.step, request.scopedVars),
@@ -507,44 +523,343 @@ export class VictoriaLogsDatasource
   getLogRowContext = async (
     row: LogRowModel,
     options?: LogRowContextOptions,
+    query?: Query
   ): Promise<{ data: DataFrame[] }> => {
-    const contextRequest = this.makeLogContextDataRequest(row, options);
-    return lastValueFrom(this.runQuery(contextRequest));
-  };
-
-  private prepareLogContextQueryExpr = (row: LogRowModel): string => {
-    let streamId = '';
-    const streamIds = row.dataFrame.meta?.custom?.streamIds;
-    if (streamIds && streamIds.length > 0) {
-      streamId = streamIds[row.rowIndex];
-    }
-
-    if (!streamId && row.labels[LABEL_STREAM_ID]) {
-      // Explore View
-      streamId = row.labels[LABEL_STREAM_ID];
-    } else if (!streamId) {
-      // Dashboard View
-      const transformedLabels: Labels = {};
-      Object.values(row.labels).forEach((label) => {
-        const [key, value] = label.split(':');
-        const cleanedKey = key.trim();
-        transformedLabels[cleanedKey] = value.trim().replace(/"/g, '');
-      });
-      streamId = transformedLabels[LABEL_STREAM_ID];
-    }
-
-    return addLabelToQuery('', { key: LABEL_STREAM_ID, value: streamId, operator: '' });
-  };
-
-  private makeLogContextDataRequest = (row: LogRowModel, options?: LogRowContextOptions): DataQueryRequest<Query> => {
     const direction = options?.direction || LogRowContextQueryDirection.Backward;
+    const requestedWindowMs = clampPositiveInt(options?.timeWindowMs, DEFAULT_LOG_CONTEXT_WINDOW_MS, MAX_LOG_CONTEXT_WINDOW_MS);
+    const sourceSearchWords = this.getLogContextSearchWords(row);
 
-    const query: Query = {
-      expr: this.prepareLogContextQueryExpr(row),
-      refId: `${REF_ID_STARTER_LOG_CONTEXT_QUERY}${row.dataFrame.refId}-${options?.direction}`
+    const contextRequest = this.makeLogContextDataRequest(row, {
+      ...options,
+      direction,
+      timeWindowMs: requestedWindowMs,
+    }, query);
+    const response = this.applyContextSearchWords(await lastValueFrom(this.runQuery(contextRequest)), sourceSearchWords);
+
+    const hasDirectionalRows = this.hasDirectionalContextRows(response.data, row.timeEpochMs, direction);
+    if (hasDirectionalRows || requestedWindowMs >= MAX_LOG_CONTEXT_WINDOW_MS) {
+      return response;
+    }
+
+    const expandedRequest = this.makeLogContextDataRequest(row, {
+      ...options,
+      direction,
+      timeWindowMs: MAX_LOG_CONTEXT_WINDOW_MS,
+    }, query);
+
+    return this.applyContextSearchWords(await lastValueFrom(this.runQuery(expandedRequest)), sourceSearchWords);
+  };
+
+
+  private hasDirectionalContextRows = (
+    frames: DataFrame[],
+    rowTimeEpochMs: number,
+    direction: LogRowContextQueryDirection
+  ): boolean => {
+    const isForwardDirection = direction === LogRowContextQueryDirection.Forward;
+
+    for (const frame of frames) {
+      const timeField = frame.fields.find((field) => field.type === FieldType.time);
+      if (!timeField) {
+        continue;
+      }
+
+      const values = timeField.values as { length?: number; get?: (index: number) => unknown; [index: number]: unknown };
+      const valuesLength = typeof values.length === 'number' ? values.length : 0;
+
+      for (let index = 0; index < valuesLength; index++) {
+        const rawValue = typeof values.get === 'function' ? values.get(index) : values[index];
+        if (rawValue == null) {
+          continue;
+        }
+
+        let timestampMs: number;
+        if (rawValue instanceof Date) {
+          timestampMs = rawValue.valueOf();
+        } else {
+          const numericValue = Number(rawValue);
+          if (!Number.isFinite(numericValue)) {
+            continue;
+          }
+
+          timestampMs =
+            numericValue > 1e14
+              ? Math.trunc(numericValue / 1e6)
+              : numericValue > 1e11
+                ? Math.trunc(numericValue)
+                : Math.trunc(numericValue * 1000);
+        }
+
+        if (isForwardDirection ? timestampMs > rowTimeEpochMs : timestampMs < rowTimeEpochMs) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  };
+
+  private getLogContextSourceExpr = (row: LogRowModel, query?: Query): string | undefined => {
+    if (query?.expr?.trim()) {
+      return query.expr;
+    }
+
+    const sourceQuery = (row.dataFrame.meta?.custom as { sourceQuery?: Partial<Query> } | undefined)?.sourceQuery;
+    if (typeof sourceQuery?.expr === 'string' && sourceQuery.expr.trim()) {
+      return sourceQuery.expr;
+    }
+
+    return undefined;
+  };
+
+  private getLogContextStreamId = (row: LogRowModel): string | undefined => {
+    const streamIds = (row.dataFrame.meta?.custom as { streamIds?: string[] } | undefined)?.streamIds;
+    const streamIdFromMeta = Array.isArray(streamIds) ? streamIds[row.rowIndex] : undefined;
+
+    if (typeof streamIdFromMeta === 'string' && streamIdFromMeta.trim()) {
+      return streamIdFromMeta;
+    }
+
+    const streamIdFromLabels = row.labels[LABEL_STREAM_ID];
+    if (streamIdFromLabels) {
+      return streamIdFromLabels;
+    }
+
+    const transformedLabels: Labels = {};
+    Object.values(row.labels).forEach((label) => {
+      const [key, value] = label.split(':');
+      const cleanedKey = key.trim();
+      transformedLabels[cleanedKey] = value.trim().replace(/"/g, '');
+    });
+
+    return transformedLabels[LABEL_STREAM_ID];
+  };
+
+  private getLogContextSearchWords = (row: LogRowModel): string[] | undefined => {
+    const searchWords = row.dataFrame.meta?.searchWords;
+    if (!Array.isArray(searchWords)) {
+      return undefined;
+    }
+
+    const normalizedSearchWords = searchWords.filter((word): word is string => typeof word === 'string' && word.length > 0);
+    return normalizedSearchWords.length ? normalizedSearchWords : undefined;
+  };
+
+  private applyContextSearchWords = (
+    response: { data: DataFrame[] },
+    sourceSearchWords?: string[]
+  ): { data: DataFrame[] } => {
+    if (!sourceSearchWords?.length) {
+      return response;
+    }
+
+    return {
+      ...response,
+      data: response.data.map((frame) => {
+        const frameSearchWords = Array.isArray(frame.meta?.searchWords)
+          ? frame.meta.searchWords.filter((word): word is string => typeof word === 'string' && word.length > 0)
+          : [];
+
+        const mergedSearchWords = Array.from(new Set([...frameSearchWords, ...sourceSearchWords]));
+
+        return {
+          ...frame,
+          meta: {
+            ...frame.meta,
+            searchWords: mergedSearchWords,
+          },
+        };
+      }),
+    };
+  };
+
+  private getContextFilterFieldsToRemove = (): Set<string> => {
+    const fields = new Set<string>(['_stream_id', 'level']);
+
+    for (const rule of this.getActiveLevelRules()) {
+      const normalizedField = rule.field?.trim().replace(/^"|"$/g, '').toLowerCase();
+      if (normalizedField) {
+        fields.add(normalizedField);
+      }
+    }
+
+    return fields;
+  };
+
+  private extractFilterFieldName = (filterPart: string): string | undefined => {
+    const match = filterPart
+      .trim()
+      .match(/^(?:!\s*)?(?:\(\s*)?(?:"((?:[^"\\]|\\.)+)"|([^\s:()]+))\s*:/);
+
+    if (!match) {
+      return undefined;
+    }
+
+    return (match[1] || match[2] || '').replace(/\\"/g, '"').trim();
+  };
+
+  private shouldExcludeContextFilter = (filterPart: string, excludedFields: Set<string>): boolean => {
+    const fieldName = this.extractFilterFieldName(filterPart);
+    if (!fieldName) {
+      return false;
+    }
+
+    return excludedFields.has(fieldName.toLowerCase());
+  };
+
+  private isDetachedFunctionArgsGroup = (filter: FilterVisualQuery): boolean => {
+    if (filter.values.length === 0) {
+      return false;
+    }
+
+    return filter.values.every((value) => {
+      if (typeof value === 'string') {
+        return !value.includes(':');
+      }
+      return this.isDetachedFunctionArgsGroup(value);
+    });
+  };
+
+  private pruneContextFilters = (
+    filters: FilterVisualQuery,
+    shouldRemove: (filterPart: string) => boolean
+  ): { filter?: FilterVisualQuery; removed: boolean } => {
+    const prune = (node: FilterVisualQuery): { filter?: FilterVisualQuery; removed: boolean } => {
+      const values: Array<string | FilterVisualQuery> = [];
+      const operators: string[] = [];
+      let removed = false;
+      let removeDetachedFunctionArgs = false;
+
+      node.values.forEach((value, index) => {
+        if (typeof value === 'string') {
+          const trimmedValue = value.trim();
+          const isDetachedFunctionArgs =
+            removeDetachedFunctionArgs &&
+            trimmedValue.startsWith('(') &&
+            trimmedValue.endsWith(')') &&
+            !trimmedValue.includes(':');
+          const isRemoved = shouldRemove(value) || isDetachedFunctionArgs;
+
+          if (isRemoved) {
+            removed = true;
+            removeDetachedFunctionArgs = /:[a-zA-Z_][\w.]*$/.test(trimmedValue);
+            return;
+          }
+
+          removeDetachedFunctionArgs = false;
+          if (values.length > 0) {
+            operators.push(node.operators[index - 1] || 'AND');
+          }
+          values.push(value);
+          return;
+        }
+
+        const nested = prune(value);
+        removed = removed || nested.removed;
+
+        if (removeDetachedFunctionArgs && nested.filter && this.isDetachedFunctionArgsGroup(nested.filter)) {
+          removed = true;
+          removeDetachedFunctionArgs = false;
+          return;
+        }
+
+        removeDetachedFunctionArgs = false;
+        if (!nested.filter || nested.filter.values.length === 0) {
+          return;
+        }
+
+        if (values.length > 0) {
+          operators.push(node.operators[index - 1] || 'AND');
+        }
+        values.push(nested.filter);
+      });
+
+      if (values.length === 0) {
+        return { removed };
+      }
+
+      return {
+        filter: {
+          values,
+          operators,
+        },
+        removed,
+      };
     };
 
-    const range = this.createContextTimeRange(row.timeEpochMs, direction);
+    return prune(filters);
+  };
+
+  private prepareLogContextQueryExpr = (sourceExpr?: string): string => {
+    const baseExpr = (sourceExpr || '').trim();
+    if (!baseExpr) {
+      return '*';
+    }
+
+    const [filterPart = '', ...pipeParts] = splitExpression(baseExpr);
+    if (!filterPart) {
+      return baseExpr;
+    }
+
+    const parsed = buildVisualQueryFromString(filterPart);
+    if (parsed.errors.length) {
+      return baseExpr;
+    }
+
+    const excludedFields = this.getContextFilterFieldsToRemove();
+    const { filter, removed } = this.pruneContextFilters(parsed.query.filters, (part) =>
+      this.shouldExcludeContextFilter(part, excludedFields)
+    );
+    const hasMsgFilters = (parsed.query.msgFilters || []).length > 0;
+
+    if (!removed && !hasMsgFilters) {
+      return baseExpr;
+    }
+
+    const filterExpr = parseVisualQueryToString({
+      filters: removed ? filter || { values: [], operators: [] } : filter || parsed.query.filters,
+      pipes: [],
+      msgFilters: [],
+      msgFilterOperators: [],
+    }).trim();
+
+    const queryParts = [
+      filterExpr,
+      ...pipeParts.map((part) => part.trim()).filter(Boolean),
+    ].filter(Boolean);
+
+    return queryParts.length > 0 ? queryParts.join(' | ') : '*';
+  };
+
+  private addContextStreamFilter = (expr: string, streamId?: string): string => {
+    if (!streamId?.trim()) {
+      return expr;
+    }
+
+    const baseExpr = expr.trim() === '*' ? '' : expr;
+    return addLabelToQuery(baseExpr, { key: LABEL_STREAM_ID, value: streamId, operator: '' });
+  };
+
+  private makeLogContextDataRequest = (row: LogRowModel, options?: LogRowContextOptions, sourceQuery?: Query): DataQueryRequest<Query> => {
+    const direction = options?.direction || LogRowContextQueryDirection.Backward;
+
+    const contextMaxLines = clampPositiveInt(options?.limit, DEFAULT_LOG_CONTEXT_MAX_LINES, MAX_LOG_CONTEXT_MAX_LINES);
+    const contextWindowMs = clampPositiveInt(options?.timeWindowMs, DEFAULT_LOG_CONTEXT_WINDOW_MS, MAX_LOG_CONTEXT_WINDOW_MS);
+    const contextSourceExpr = this.getLogContextSourceExpr(row, sourceQuery);
+    const interpolatedExpr = contextSourceExpr
+      ? this.interpolateString(contextSourceExpr, options?.scopedVars)
+      : undefined;
+
+    const streamId = this.getLogContextStreamId(row);
+    const contextExpr = this.addContextStreamFilter(this.prepareLogContextQueryExpr(interpolatedExpr), streamId);
+
+    const query: Query = {
+      expr: contextExpr,
+      refId: `${REF_ID_STARTER_LOG_CONTEXT_QUERY}${row.dataFrame.refId}-${options?.direction}`,
+      maxLines: contextMaxLines,
+    };
+
+    const range = this.createContextTimeRange(row.timeEpochMs, direction, contextWindowMs);
 
     const interval = rangeUtil.calculateInterval(range, 1);
 
@@ -554,15 +869,15 @@ export class VictoriaLogsDatasource
       intervalMs: interval.intervalMs,
       range: range,
       requestId: `${REF_ID_STARTER_LOG_CONTEXT_REQUEST}${row.dataFrame.refId}-${options?.direction}`,
-      scopedVars: {},
+      scopedVars: options?.scopedVars || {},
       startTime: Date.now(),
       targets: [query],
       timezone: 'UTC'
     };
   };
 
-  private createContextTimeRange = (rowTimeEpochMs: number, direction?: LogRowContextQueryDirection): TimeRange => {
-    const offset = 2 * 60 * 60 * 1000;  // 2h
+  private createContextTimeRange = (rowTimeEpochMs: number, direction?: LogRowContextQueryDirection, windowMs = DEFAULT_LOG_CONTEXT_WINDOW_MS): TimeRange => {
+    const offset = windowMs;
     const overlap = 1000;
 
     const timeRange =

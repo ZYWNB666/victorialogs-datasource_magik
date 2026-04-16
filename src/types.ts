@@ -147,6 +147,8 @@ export interface VisualQuery {
   pipes: string[]; //PipeVisualQuery[];
   /** _msg filter conditions for text search */
   msgFilters: MsgFilterCondition[];
+  /** operators between adjacent msgFilters (e.g. ['AND', 'OR']) */
+  msgFilterOperators?: string[];
 }
 
 export interface RequestArguments {

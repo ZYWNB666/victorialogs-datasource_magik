@@ -32,81 +32,118 @@ export const filterVisualQueryToString = (
   return output;
 };
 
-/** Build _msg filter string from conditions */
-const buildMsgFilterString = (msgFilters: MsgFilterCondition[]): string => {
-  const parts: string[] = [];
-  
-  for (const condition of msgFilters) {
-    if (!condition.text || condition.text.trim() === '' || condition.text.trim() === '*') {
-      continue;
-    }
-    
-    const text = condition.text;
-    
-    // Support backward compatibility with old boolean 'contains' field
-    if (condition.contains !== undefined && !condition.type) {
-      if (condition.contains) {
-        parts.push(`_msg:"${text}"`);
-      } else {
-        parts.push(`_msg!~"${text}"`);
-      }
-      continue;
-    }
-    
-    // Handle different filter types
-    switch (condition.type) {
-      case LineFilterType.Contains:
-        // Line contains (case sensitive): _msg:"text"
-        parts.push(`_msg:"${text}"`);
-        break;
-      
-      case LineFilterType.NotContains:
-        // Line does not contain (case sensitive): _msg:!"text"
-        parts.push(`_msg:!"${text}"`);
-        break;
-      
-      case LineFilterType.ContainsCaseInsensitive:
-        // Line contains case insensitive: _msg:~"(?i)text"
-        parts.push(`_msg:~"(?i)${text}"`);
-        break;
-      
-      case LineFilterType.NotContainsCaseInsensitive:
-        // Line does not contain case insensitive: _msg:!~"(?i)text"
-        parts.push(`_msg:!~"(?i)${text}"`);
-        break;
-      
-      case LineFilterType.RegexMatch:
-        // Line contains regex match: _msg:~"regex"
-        parts.push(`_msg:~"${text}"`);
-        break;
-      
-      case LineFilterType.RegexNotMatch:
-        // Line does not match regex: _msg:!~"regex"
-        parts.push(`_msg:!~"${text}"`);
-        break;
-      
-      case LineFilterType.IpFilter:
-        // IP line filter expression: _msg:ip("ip_range")
-        parts.push(`_msg:ip("${text}")`);
-        break;
-      
-      default:
-        // Default to contains for unknown types
-        parts.push(`_msg:"${text}"`);
-    }
+const normalizeOperator = (operator?: string): string => {
+  if (!operator) {
+    return DEFAULT_FILTER_OPERATOR;
   }
-  
-  return parts.join(' AND ');
+
+  const upperOperator = operator.toUpperCase();
+  return upperOperator === 'OR' ? 'OR' : DEFAULT_FILTER_OPERATOR;
+};
+
+const escapeMsgFilterText = (text: string): string => {
+  let escaped = '';
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (char !== '"') {
+      escaped += char;
+      continue;
+    }
+
+    let precedingBackslashes = 0;
+    for (let j = i - 1; j >= 0 && text[j] === '\\'; j--) {
+      precedingBackslashes++;
+    }
+
+    if (precedingBackslashes % 2 === 0) {
+      escaped += '\\';
+    }
+
+    escaped += char;
+  }
+
+  return escaped;
+};
+
+const msgFilterConditionToString = (condition: MsgFilterCondition): string | null => {
+  if (!condition.text || condition.text.trim() === '' || condition.text.trim() === '*') {
+    return null;
+  }
+
+  const text = escapeMsgFilterText(condition.text);
+
+  // Support backward compatibility with old boolean 'contains' field
+  if (condition.contains !== undefined && !condition.type) {
+    if (condition.contains) {
+      return `_msg:"${text}"`;
+    }
+    return `_msg!~"${text}"`;
+  }
+
+  // Handle different filter types
+  switch (condition.type) {
+    case LineFilterType.Contains:
+      // Line contains (case sensitive): _msg:"text"
+      return `_msg:"${text}"`;
+
+    case LineFilterType.NotContains:
+      // Line does not contain (case sensitive): _msg:!"text"
+      return `_msg:!"${text}"`;
+
+    case LineFilterType.ContainsCaseInsensitive:
+      // Line contains case insensitive: _msg:~"(?i)text"
+      return `_msg:~"(?i)${text}"`;
+
+    case LineFilterType.NotContainsCaseInsensitive:
+      // Line does not contain case insensitive: _msg:!~"(?i)text"
+      return `_msg:!~"(?i)${text}"`;
+
+    case LineFilterType.RegexMatch:
+      // Line contains regex match: _msg:~"regex"
+      return `_msg:~"${text}"`;
+
+    case LineFilterType.RegexNotMatch:
+      // Line does not match regex: _msg:!~"regex"
+      return `_msg:!~"${text}"`;
+
+    case LineFilterType.IpFilter:
+      // IP line filter expression: _msg:ip("ip_range")
+      return `_msg:ip("${text}")`;
+
+    default:
+      // Default to contains for unknown types
+      return `_msg:"${text}"`;
+  }
+};
+
+/** Build _msg filter string from conditions */
+const buildMsgFilterString = (msgFilters: MsgFilterCondition[], msgFilterOperators: string[] = []): string => {
+  const parts = msgFilters
+    .map(condition => msgFilterConditionToString(condition))
+    .filter((part): part is string => Boolean(part));
+
+  if (parts.length === 0) {
+    return '';
+  }
+
+  let result = parts[0];
+  for (let i = 1; i < parts.length; i++) {
+    const operator = normalizeOperator(msgFilterOperators[i - 1]);
+    result += ` ${operator} ${parts[i]}`;
+  }
+
+  return result;
 };
 
 export const parseVisualQueryToString = (query: VisualQuery): string => {
   const pipesPart = query.pipes?.length ? ` | ${query.pipes.join(' | ')}` : '';
-  
+
   // Build _msg filter part from conditions
-  const msgFilterPart = buildMsgFilterString(query.msgFilters || []);
-  
+  const msgFilterPart = buildMsgFilterString(query.msgFilters || [], query.msgFilterOperators || []);
+
   const filtersPart = filterVisualQueryToString(query.filters);
-  
+
   // Combine msgFilter with other filters
   let result = '';
   if (msgFilterPart && filtersPart.trim()) {
@@ -116,6 +153,6 @@ export const parseVisualQueryToString = (query: VisualQuery): string => {
   } else {
     result = filtersPart;
   }
-  
+
   return result + pipesPart;
 };

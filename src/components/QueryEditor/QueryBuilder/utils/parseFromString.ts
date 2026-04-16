@@ -1,3 +1,4 @@
+import { splitByPipes } from '../../../../LogsQL/splitByPipes';
 import { FilterVisualQuery, LineFilterType, MsgFilterCondition, VisualQuery } from '../../../../types';
 
 import { BUILDER_OPERATORS, isEmptyQuery } from './parsing';
@@ -13,7 +14,8 @@ export const buildVisualQueryFromString = (expr: string): Context => {
   const visQuery: VisualQuery = {
     filters: { operators: [], values: [] },
     pipes: [],
-    msgFilters: []
+    msgFilters: [],
+    msgFilterOperators: [],
   };
 
   const context: Context = {
@@ -22,10 +24,11 @@ export const buildVisualQueryFromString = (expr: string): Context => {
   };
 
   try {
-    const { filters, pipes, msgFilters } = handleExpression(expr);
+    const { filters, pipes, msgFilters, msgFilterOperators } = handleExpression(expr);
     visQuery.filters = filters;
     visQuery.pipes = pipes;
     visQuery.msgFilters = msgFilters;
+    visQuery.msgFilterOperators = msgFilterOperators;
   } catch (err) {
     console.error(err);
     if (err instanceof Error) {
@@ -42,18 +45,29 @@ export const buildVisualQueryFromString = (expr: string): Context => {
 };
 
 const handleExpression = (expr: string) => {
-  const [filterStrPart, ...pipeParts] = expr.split('|').map(part => part.trim());
-  const { filters, msgFilters } = parseStringToFilterVisualQuery(filterStrPart);
-  return { filters, pipes: pipeParts, msgFilters };
+  const [filterStrPart, ...pipeParts] = splitByPipes(expr).map(part => part.trim());
+  const { filters, msgFilters, msgFilterOperators } = parseStringToFilterVisualQuery(filterStrPart);
+  return { filters, pipes: pipeParts, msgFilters, msgFilterOperators };
 };
 
 export const splitExpression = (expr: string): string[] => {
-  return expr.split('|').map(part => part.trim());
+  return splitByPipes(expr).map(part => part.trim());
 };
 
-const parseStringToFilterVisualQuery = (expression: string): { filters: FilterVisualQuery; msgFilters: MsgFilterCondition[] } => {
+const normalizeFilterOperator = (operator: string) => {
+  const upperOperator = operator.toUpperCase();
+  return BUILDER_OPERATORS.includes(upperOperator) ? operator : 'AND';
+};
+
+const parseStringToFilterVisualQuery = (expression: string): { filters: FilterVisualQuery; msgFilters: MsgFilterCondition[]; msgFilterOperators: string[] } => {
   const parsedExpressions = parseExpression(expression);
   const msgFilters: MsgFilterCondition[] = [];
+  const msgFilterOperators: string[] = [];
+
+  const normalizeMsgOperator = (operator: string) => {
+    const upperOperator = operator.toUpperCase();
+    return BUILDER_OPERATORS.includes(upperOperator) ? upperOperator : 'AND';
+  };
 
   const groupFilterQuery = (parts: ParsedExpression[]): FilterVisualQuery => {
     const filter: FilterVisualQuery = {
@@ -61,77 +75,103 @@ const parseStringToFilterVisualQuery = (expression: string): { filters: FilterVi
       operators: [],
     };
 
-    const parsePart = (part: ParsedExpression, _index: number) => {
+    let pendingOperator: string | null = null;
+    let previousTokenType: 'msg' | 'field' | null = null;
+
+    const parsePart = (part: ParsedExpression) => {
       if (!part) {
         return;
       }
+
       if (typeof part === 'string') {
         if (BUILDER_OPERATORS.includes(part.toUpperCase())) {
-          filter.operators.push(part);
-        } else {
-          const parsedParts = parseStringPart(part);
-          // Extract _msg filters and treat them as msgFilters
-          for (const p of parsedParts) {
-            // Check if this is a _msg filter: _msg:value or _msg:~value or _msg:=value etc.
-            // Also support negation: _msg:!value, _msg:!~value (not contains)
-            // Operators: ! (not contains), !~ (not regex), ~ (regex), = or empty (contains)
-            const msgMatch = p.match(/^_msg\s*:\s*(!~|!|~|=)?\s*("[^"]*"|'[^']*'|\S+)?/i);
-            if (msgMatch) {
-              const operator = msgMatch[1] || '';
-              let value = msgMatch[2] || '';
-              // Remove quotes if present
-              if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-                value = value.slice(1, -1);
-              }
-              
-              // Determine the filter type based on operator and value
-              let type: LineFilterType;
-              const contains = operator !== '!~' && operator !== '!';
-              
-              // Check for case insensitive pattern: (?i) prefix
-              const isCaseInsensitive = value.startsWith('(?i)');
-              const cleanValue = isCaseInsensitive ? value.slice(4) : value;
-              
-              if (operator === '!~') {
-                // Not regex match
-                if (isCaseInsensitive) {
-                  type = LineFilterType.NotContainsCaseInsensitive;
-                } else {
-                  type = LineFilterType.RegexNotMatch;
-                }
-              } else if (operator === '!') {
-                // Not contains (exact)
-                type = LineFilterType.NotContains;
-              } else if (operator === '~') {
-                // Regex match
-                if (isCaseInsensitive) {
-                  type = LineFilterType.ContainsCaseInsensitive;
-                } else {
-                  type = LineFilterType.RegexMatch;
-                }
+          pendingOperator = part;
+          return;
+        }
+
+        const parsedParts = parseStringPart(part);
+
+        for (const p of parsedParts) {
+          if (BUILDER_OPERATORS.includes(p.toUpperCase())) {
+            pendingOperator = p;
+            continue;
+          }
+
+          // Check if this is a _msg filter: _msg:value or _msg:~value or _msg:=value etc.
+          // Also support negation: _msg:!value, _msg:!~value (not contains)
+          // Operators: ! (not contains), !~ (not regex), ~ (regex), = or empty (contains)
+          const msgMatch = p.match(/^_msg\s*:\s*(!~|!|~|=)?\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)?/i);
+          if (msgMatch) {
+            const operator = msgMatch[1] || '';
+            let value = msgMatch[2] || '';
+            // Remove quotes if present
+            if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+              value = value.slice(1, -1);
+            }
+
+            // Determine the filter type based on operator and value
+            let type: LineFilterType;
+            const contains = operator !== '!~' && operator !== '!';
+
+            // Check for case insensitive pattern: (?i) prefix
+            const isCaseInsensitive = value.startsWith('(?i)');
+            const cleanValue = isCaseInsensitive ? value.slice(4) : value;
+
+            if (operator === '!~') {
+              // Not regex match
+              if (isCaseInsensitive) {
+                type = LineFilterType.NotContainsCaseInsensitive;
               } else {
-                // Default contains (operator is '' or '=')
-                type = LineFilterType.Contains;
+                type = LineFilterType.RegexNotMatch;
               }
-              
-              if (cleanValue && cleanValue !== '*') {
-                msgFilters.push({ text: cleanValue, type, contains });
+            } else if (operator === '!') {
+              // Not contains (exact)
+              type = LineFilterType.NotContains;
+            } else if (operator === '~') {
+              // Regex match
+              if (isCaseInsensitive) {
+                type = LineFilterType.ContainsCaseInsensitive;
+              } else {
+                type = LineFilterType.RegexMatch;
               }
             } else {
-              filter.values.push(p);
+              // Default contains (operator is '' or '=')
+              type = LineFilterType.Contains;
             }
+
+            if (cleanValue && cleanValue !== '*') {
+              if (previousTokenType === 'msg' && pendingOperator) {
+                msgFilterOperators.push(normalizeMsgOperator(pendingOperator));
+              }
+              msgFilters.push({ text: cleanValue, type, contains });
+              previousTokenType = 'msg';
+              pendingOperator = null;
+            }
+          } else {
+            if (previousTokenType === 'field' && pendingOperator) {
+              filter.operators.push(normalizeFilterOperator(pendingOperator));
+            }
+            filter.values.push(p);
+            previousTokenType = 'field';
+            pendingOperator = null;
           }
         }
       } else {
+        if (previousTokenType === 'field' && pendingOperator) {
+          filter.operators.push(normalizeFilterOperator(pendingOperator));
+        }
         filter.values.push(groupFilterQuery(part));
+        previousTokenType = 'field';
+        pendingOperator = null;
       }
     };
+
     parts.forEach(parsePart);
 
     return filter;
   };
 
-  return { filters: groupFilterQuery(parsedExpressions), msgFilters };
+  return { filters: groupFilterQuery(parsedExpressions), msgFilters, msgFilterOperators };
 };
 
 const splitByTopLevelParentheses = (input: string) => {
@@ -202,8 +242,10 @@ const parseExpression = (input: string): ParsedExpression[] => {
 };
 
 const parseStringPart = (expression: string) => {
-  // Regex updated to handle :in(...) or simple key:value
-  const regex = /("[^"]*"|'[^']*'|\S+)\s*:\s*(in\s*\([^)]*\)|"[^"]*"|'[^']*'|\S+)?|\S+/g;
+  // Handles key:value pairs where value can be prefixed with !~|!|~|= and optionally quoted with spaces.
+  // Supports escaped quotes inside quoted values.
+  // Examples: _msg:~"\"start_time|Use Proxy:", field:"value with spaces", key:in("a","b")
+  const regex = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)\s*:\s*((?:!~|!|~|=)?\s*(?:in\s*\([^)]*\)|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+))?|\S+/g;
   const matches = expression.match(regex) || [];
   return matches.map(match => match.trim());
 };

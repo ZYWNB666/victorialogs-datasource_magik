@@ -124,6 +124,51 @@ func TestQuery_getQueryURL(t *testing.T) {
 	}
 	f(o)
 
+	// clamps max lines for regular instant query
+	o = opts{
+		RefID:    "1",
+		Expr:     "_time:1s",
+		MaxLines: 20000,
+		TimeRange: backend.TimeRange{
+			From: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
+			To:   time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC),
+		},
+		QueryType: QueryTypeInstant,
+		rawURL:    "http://127.0.0.1:9428",
+		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=10000&query=_time%3A1s&start=1609459200",
+	}
+	f(o)
+
+	// uses context-specific max lines fallback
+	o = opts{
+		RefID:    "log-context-query-1-desc",
+		Expr:     "_time:1s",
+		MaxLines: 0,
+		TimeRange: backend.TimeRange{
+			From: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
+			To:   time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC),
+		},
+		QueryType: QueryTypeInstant,
+		rawURL:    "http://127.0.0.1:9428",
+		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=100&query=_time%3A1s&start=1609459200",
+	}
+	f(o)
+
+	// clamps context max lines to context-specific cap
+	o = opts{
+		RefID:    "log-context-query-1-desc",
+		Expr:     "_time:1s",
+		MaxLines: 5000,
+		TimeRange: backend.TimeRange{
+			From: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
+			To:   time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC),
+		},
+		QueryType: QueryTypeInstant,
+		rawURL:    "http://127.0.0.1:9428",
+		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=1000&query=_time%3A1s&start=1609459200",
+	}
+	f(o)
+
 	// has expression and max lines stats
 	o = opts{
 		RefID:    "1",

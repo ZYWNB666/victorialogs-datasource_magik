@@ -57,7 +57,7 @@
         "path": "img/alerting.png"
       }
     ],
-    "version": "0.26.3-custom",
+    "version": "0.26.3-custom-20260416183832",
     "updated": "%TODAY%"
   },
   "dependencies": {

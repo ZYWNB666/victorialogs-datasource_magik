@@ -17,15 +17,18 @@ import (
 )
 
 const (
-	instantQueryPath    = "/select/logsql/query"
-	tailQueryPath       = "/select/logsql/tail"
-	statsQueryPath      = "/select/logsql/stats_query"
-	statsQueryRangePath = "/select/logsql/stats_query_range"
-	hitsQueryPath       = "/select/logsql/hits"
-	defaultMaxLines     = 1000
-	legendFormatAuto    = "__auto"
-	metricsName         = "__name__"
-	defaultInterval     = 15 * time.Second
+	instantQueryPath          = "/select/logsql/query"
+	tailQueryPath             = "/select/logsql/tail"
+	statsQueryPath            = "/select/logsql/stats_query"
+	statsQueryRangePath       = "/select/logsql/stats_query_range"
+	hitsQueryPath             = "/select/logsql/hits"
+	defaultMaxLines           = 1000
+	maxQueryMaxLines          = 10000
+	defaultLogContextMaxLines = 100
+	maxLogContextMaxLines     = 1000
+	legendFormatAuto          = "__auto"
+	metricsName               = "__name__"
+	defaultInterval           = 15 * time.Second
 )
 
 // QueryType represents query type
@@ -107,7 +110,18 @@ func (q *Query) getQueryURL(rawURL string, queryParams string) (string, error) {
 	}
 }
 
-// queryInstantURL prepare query url for instant query
+func clampPositiveInt(value int, fallback int, max int) int {
+	candidate := value
+	if candidate <= 0 {
+		candidate = fallback
+	}
+	if candidate > max {
+		return max
+	}
+	return candidate
+}
+
+// queryTailURL prepare query url for tail query
 func (q *Query) queryTailURL(rawURL string, queryParams string) (string, error) {
 	if rawURL == "" {
 		return "", fmt.Errorf("url can't be blank")
@@ -150,8 +164,9 @@ func (q *Query) queryInstantURL(queryParams url.Values) string {
 		}
 	}
 
-	if q.MaxLines <= 0 {
-		q.MaxLines = defaultMaxLines
+	maxLines := clampPositiveInt(q.MaxLines, defaultMaxLines, maxQueryMaxLines)
+	if strings.HasPrefix(q.RefID, "log-context-query-") {
+		maxLines = clampPositiveInt(q.MaxLines, defaultLogContextMaxLines, maxLogContextMaxLines)
 	}
 
 	now := time.Now()
@@ -164,7 +179,7 @@ func (q *Query) queryInstantURL(queryParams url.Values) string {
 
 	q.Expr = utils.ReplaceTemplateVariable(q.Expr, q.IntervalMs, q.TimeRange)
 	values.Set("query", q.Expr)
-	values.Set("limit", strconv.Itoa(q.MaxLines))
+	values.Set("limit", strconv.Itoa(maxLines))
 	values.Set("start", strconv.FormatInt(q.TimeRange.From.Unix(), 10))
 	values.Set("end", strconv.FormatInt(q.TimeRange.To.Unix(), 10))
 
@@ -207,10 +222,6 @@ func (q *Query) statsQueryRangeURL(queryParams url.Values, minInterval time.Dura
 		for _, v := range vl {
 			values.Add(k, v)
 		}
-	}
-
-	if q.MaxLines <= 0 {
-		q.MaxLines = defaultMaxLines
 	}
 
 	now := time.Now()

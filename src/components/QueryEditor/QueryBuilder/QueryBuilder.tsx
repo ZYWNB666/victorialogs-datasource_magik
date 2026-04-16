@@ -1,7 +1,7 @@
 import { css } from '@emotion/css';
 import React, { Fragment, memo, useCallback } from 'react';
 
-import { GrafanaTheme2, TimeRange } from '@grafana/data';
+import { GrafanaTheme2, SelectableValue, TimeRange } from '@grafana/data';
 import { IconButton, Input, Label, Select, useStyles2 } from '@grafana/ui';
 
 import { VictoriaLogsDatasource } from '../../../datasource';
@@ -11,6 +11,7 @@ import QueryBuilderAddFilter from './components/QueryBuilderAddFilter';
 import QueryBuilderFieldFilter from './components/QueryBuilderFilters/QueryBuilderFieldFilter';
 import QueryBuilderSelectOperator from './components/QueryBuilderOperators/QueryBuilderSelectOperator';
 import { DEFAULT_FILTER_OPERATOR } from './utils/parseToString';
+import { BUILDER_OPERATORS } from './utils/parsing';
 
 interface Props {
   query: VisualQuery;
@@ -58,18 +59,44 @@ const MsgFilterConditionTypeOptions = [
   },
 ];
 
+const MsgFilterOperatorOptions = BUILDER_OPERATORS.map((operator) => ({
+  label: operator,
+  value: operator,
+}));
+
 const QueryBuilder = memo<Props>(({ datasource, query, onChange, timeRange }) => {
   const styles = useStyles2(getStyles);
   const { filters, msgFilters } = query;
 
+  const normalizeOperatorsLength = (operators: string[], filtersCount: number): string[] => {
+    const expectedLength = Math.max(0, filtersCount - 1);
+    const normalized = operators.slice(0, expectedLength);
+    while (normalized.length < expectedLength) {
+      normalized.push(DEFAULT_FILTER_OPERATOR);
+    }
+    return normalized;
+  };
+
   const handleAddMsgFilter = useCallback(() => {
     const newMsgFilters = [...(msgFilters || []), { text: '', type: LineFilterType.Contains }];
-    onChange({ ...query, msgFilters: newMsgFilters });
+    const newOperators = normalizeOperatorsLength([...(query.msgFilterOperators || []), DEFAULT_FILTER_OPERATOR], newMsgFilters.length);
+    onChange({ ...query, msgFilters: newMsgFilters, msgFilterOperators: newOperators });
   }, [onChange, query, msgFilters]);
 
   const handleRemoveMsgFilter = useCallback((index: number) => {
-    const newMsgFilters = (msgFilters || []).filter((_, i) => i !== index);
-    onChange({ ...query, msgFilters: newMsgFilters });
+    const existingFilters = msgFilters || [];
+    const existingOperators = query.msgFilterOperators || [];
+
+    const newMsgFilters = existingFilters.filter((_, i) => i !== index);
+
+    const newOperators = [...existingOperators];
+    if (index === 0) {
+      newOperators.shift();
+    } else {
+      newOperators.splice(index - 1, 1);
+    }
+
+    onChange({ ...query, msgFilters: newMsgFilters, msgFilterOperators: normalizeOperatorsLength(newOperators, newMsgFilters.length) });
   }, [onChange, query, msgFilters]);
 
   const handleMsgFilterTextChange = useCallback((index: number, text: string) => {
@@ -84,9 +111,21 @@ const QueryBuilder = memo<Props>(({ datasource, query, onChange, timeRange }) =>
     onChange({ ...query, msgFilters: newMsgFilters });
   }, [onChange, query, msgFilters]);
 
+  const handleMsgFilterOperatorChange = useCallback((index: number, operator: string) => {
+    const upperOperator = operator.toUpperCase();
+    const normalizedOperator = upperOperator === 'OR' ? 'OR' : DEFAULT_FILTER_OPERATOR;
+
+    const current = normalizeOperatorsLength(query.msgFilterOperators || [], (msgFilters || []).length);
+    const next = [...current];
+    next[index] = normalizedOperator;
+
+    onChange({ ...query, msgFilterOperators: next });
+  }, [onChange, query, msgFilters]);
+
   // Ensure at least one msgFilter is displayed (like Loki does by default)
   const displayFilters = (msgFilters && msgFilters.length > 0) ? msgFilters : [{ text: '', type: LineFilterType.Contains }];
   const hasActualFilters = msgFilters && msgFilters.length > 0;
+  const displayOperators = normalizeOperatorsLength(query.msgFilterOperators || [], displayFilters.length);
 
   return (
     <div className={styles.container}>
@@ -110,52 +149,66 @@ const QueryBuilder = memo<Props>(({ datasource, query, onChange, timeRange }) =>
         <Label className={styles.sectionLabel}>Line contains</Label>
         <div className={styles.lineContainsWrapper}>
           {displayFilters.map((filter, index) => (
-            <div key={index} className={styles.msgFilterRow}>
-              <Select
-                options={MsgFilterConditionTypeOptions}
-                value={filter.type ?? (filter.contains ? LineFilterType.Contains : LineFilterType.NotContains)}
-                onChange={(e) => {
-                  if (!hasActualFilters && index === 0) {
-                    // First interaction - create the actual filter
-                    onChange({ ...query, msgFilters: [{ text: filter.text, type: e.value as LineFilterType }] });
-                  } else {
-                    handleMsgFilterTypeChange(index, e.value as LineFilterType);
-                  }
-                }}
-                width={30}
-                menuShouldPortal
-              />
-              <Input
-                placeholder="Text to find"
-                value={filter.text}
-                onChange={(e) => {
-                  if (!hasActualFilters && index === 0) {
-                    // First interaction - create the actual filter
-                    onChange({ ...query, msgFilters: [{ text: e.currentTarget.value, type: filter.type || LineFilterType.Contains }] });
-                  } else {
-                    handleMsgFilterTextChange(index, e.currentTarget.value);
-                  }
-                }}
-                className={styles.msgInput}
-              />
-              {hasActualFilters && (
-                <IconButton
-                  name="times"
-                  tooltip="Remove"
-                  size="sm"
-                  onClick={() => handleRemoveMsgFilter(index)}
-                />
+            <Fragment key={index}>
+              {index > 0 && (
+                <div className={styles.msgOperatorRow}>
+                  <Label className={styles.operatorLabel}>Operator</Label>
+                  <Select
+                    options={MsgFilterOperatorOptions}
+                    value={displayOperators[index - 1] || DEFAULT_FILTER_OPERATOR}
+                    onChange={(e: SelectableValue<string>) => handleMsgFilterOperatorChange(index - 1, e.value || DEFAULT_FILTER_OPERATOR)}
+                    width={16}
+                    menuShouldPortal
+                  />
+                </div>
               )}
-              {index === displayFilters.length - 1 && (
-                <IconButton
-                  name="plus"
-                  tooltip="Add line filter"
-                  size="md"
-                  onClick={handleAddMsgFilter}
-                  variant="primary"
+              <div className={styles.msgFilterRow}>
+                <Select
+                  options={MsgFilterConditionTypeOptions}
+                  value={filter.type ?? (filter.contains ? LineFilterType.Contains : LineFilterType.NotContains)}
+                  onChange={(e) => {
+                    if (!hasActualFilters && index === 0) {
+                      // First interaction - create the actual filter
+                      onChange({ ...query, msgFilters: [{ text: filter.text, type: e.value as LineFilterType }], msgFilterOperators: [] });
+                    } else {
+                      handleMsgFilterTypeChange(index, e.value as LineFilterType);
+                    }
+                  }}
+                  width={30}
+                  menuShouldPortal
                 />
-              )}
-            </div>
+                <Input
+                  placeholder="Text to find"
+                  value={filter.text}
+                  onChange={(e) => {
+                    if (!hasActualFilters && index === 0) {
+                      // First interaction - create the actual filter
+                      onChange({ ...query, msgFilters: [{ text: e.currentTarget.value, type: filter.type || LineFilterType.Contains }], msgFilterOperators: [] });
+                    } else {
+                      handleMsgFilterTextChange(index, e.currentTarget.value);
+                    }
+                  }}
+                  className={styles.msgInput}
+                />
+                {hasActualFilters && (
+                  <IconButton
+                    name="times"
+                    tooltip="Remove"
+                    size="sm"
+                    onClick={() => handleRemoveMsgFilter(index)}
+                  />
+                )}
+                {index === displayFilters.length - 1 && (
+                  <IconButton
+                    name="plus"
+                    tooltip="Add line filter"
+                    size="md"
+                    onClick={handleAddMsgFilter}
+                    variant="primary"
+                  />
+                )}
+              </div>
+            </Fragment>
           ))}
         </div>
       </div>
@@ -281,6 +334,16 @@ const getStyles = (theme: GrafanaTheme2) => {
       display: flex;
       flex-direction: column;
       gap: ${theme.spacing(0.5)};
+    `,
+    msgOperatorRow: css`
+      display: flex;
+      align-items: center;
+      gap: ${theme.spacing(0.5)};
+      margin-left: ${theme.spacing(0.5)};
+    `,
+    operatorLabel: css`
+      margin: 0;
+      min-width: 56px;
     `,
     msgFilterRow: css`
       display: flex;
