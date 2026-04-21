@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Required toolchain
 
 - Go `1.25.8` (from `go.mod`)
-- Node `>=24.11.1` and Yarn `4.x` (from `.nvmrc` and `package.json`)
+- Node `24` (CI uses `24.11.1`; `.nvmrc` currently contains `20`)
+- Yarn `4.x` (`packageManager: yarn@4.13.0`)
 
 ## Common commands
 
@@ -69,6 +70,8 @@ Core logic lives in `src/datasource.ts` (`VictoriaLogsDatasource`):
 Editor selection is app-aware:
 
 - `src/components/QueryEditor/QueryEditorByApp.tsx` switches to alerting-specific editor for `CoreApp.CloudAlerting`.
+
+Autocomplete and field discovery are frontend-driven through `src/language_provider.ts`, which calls backend resource endpoints via `postResource(...)` and caches field/stream metadata results.
 
 ### Backend query/resource pipeline
 

@@ -22,13 +22,14 @@ const (
 	statsQueryPath            = "/select/logsql/stats_query"
 	statsQueryRangePath       = "/select/logsql/stats_query_range"
 	hitsQueryPath             = "/select/logsql/hits"
-	defaultMaxLines           = 1000
+	defaultMaxLines           = 500
 	maxQueryMaxLines          = 10000
 	defaultLogContextMaxLines = 100
 	maxLogContextMaxLines     = 1000
 	legendFormatAuto          = "__auto"
 	metricsName               = "__name__"
 	defaultInterval           = 15 * time.Second
+	contextQueryRefIDPrefix   = "log-context-query-"
 )
 
 // QueryType represents query type
@@ -121,6 +122,14 @@ func clampPositiveInt(value int, fallback int, max int) int {
 	return candidate
 }
 
+func formatQueryUnixTime(t time.Time, useMillis bool) string {
+	if useMillis {
+		return strconv.FormatInt(t.UnixMilli(), 10)
+	}
+
+	return strconv.FormatInt(t.Unix(), 10)
+}
+
 // queryTailURL prepare query url for tail query
 func (q *Query) queryTailURL(rawURL string, queryParams string) (string, error) {
 	if rawURL == "" {
@@ -165,7 +174,8 @@ func (q *Query) queryInstantURL(queryParams url.Values) string {
 	}
 
 	maxLines := clampPositiveInt(q.MaxLines, defaultMaxLines, maxQueryMaxLines)
-	if strings.HasPrefix(q.RefID, "log-context-query-") {
+	isContextQuery := strings.HasPrefix(q.RefID, contextQueryRefIDPrefix)
+	if isContextQuery {
 		maxLines = clampPositiveInt(q.MaxLines, defaultLogContextMaxLines, maxLogContextMaxLines)
 	}
 
@@ -180,8 +190,8 @@ func (q *Query) queryInstantURL(queryParams url.Values) string {
 	q.Expr = utils.ReplaceTemplateVariable(q.Expr, q.IntervalMs, q.TimeRange)
 	values.Set("query", q.Expr)
 	values.Set("limit", strconv.Itoa(maxLines))
-	values.Set("start", strconv.FormatInt(q.TimeRange.From.Unix(), 10))
-	values.Set("end", strconv.FormatInt(q.TimeRange.To.Unix(), 10))
+	values.Set("start", formatQueryUnixTime(q.TimeRange.From, isContextQuery))
+	values.Set("end", formatQueryUnixTime(q.TimeRange.To, isContextQuery))
 
 	q.url.RawQuery = values.Encode()
 	return q.url.String()

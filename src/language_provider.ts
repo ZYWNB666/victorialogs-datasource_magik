@@ -1,4 +1,4 @@
-import { escapeRegex, getDefaultTimeRange, LanguageProvider, TimeRange } from '@grafana/data';
+import { getDefaultTimeRange, LanguageProvider, TimeRange } from '@grafana/data';
 
 import { VictoriaLogsDatasource } from './datasource';
 import { FieldHits, FieldHitsResponse, FilterFieldType } from './types';

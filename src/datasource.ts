@@ -5,6 +5,7 @@ import {
   AdHocVariableFilter,
   CoreApp,
   DataFrame,
+  DataQuery,
   DataQueryRequest,
   DataQueryResponse,
   DataSourceGetTagKeysOptions,
@@ -13,7 +14,6 @@ import {
   DataSourceWithLogsContextSupport,
   DEFAULT_FIELD_DISPLAY_VALUES_LIMIT,
   FieldType,
-  Labels,
   LegacyMetricFindQueryOptions,
   LiveChannelScope,
   LoadingState,
@@ -80,8 +80,7 @@ export const REF_ID_STARTER_LOG_VOLUME = 'log-volume-';
 export const REF_ID_STARTER_LOG_SAMPLE = 'log-sample-';
 export const REF_ID_STARTER_LOG_CONTEXT_REQUEST = 'log-context-request-';
 export const REF_ID_STARTER_LOG_CONTEXT_QUERY = 'log-context-query-';
-export const LABEL_STREAM_ID = '_stream_id';
-export const DEFAULT_MAX_LINES = 1000;
+export const DEFAULT_MAX_LINES = 500;
 export const MAX_QUERY_MAX_LINES = 10000;
 export const DEFAULT_LOG_CONTEXT_MAX_LINES = 100;
 export const MAX_LOG_CONTEXT_MAX_LINES = 1000;
@@ -96,7 +95,7 @@ const clampPositiveInt = (value: number | undefined, fallback: number, max: numb
 
 export class VictoriaLogsDatasource
   extends DataSourceWithBackend<Query, Options>
-  implements DataSourceWithLogsContextSupport {
+  implements DataSourceWithLogsContextSupport<Query> {
   id: number | undefined;
   uid: string;
   url: string;
@@ -523,7 +522,7 @@ export class VictoriaLogsDatasource
   getLogRowContext = async (
     row: LogRowModel,
     options?: LogRowContextOptions,
-    query?: Query
+    query?: DataQuery
   ): Promise<{ data: DataFrame[] }> => {
     const direction = options?.direction || LogRowContextQueryDirection.Backward;
     const requestedWindowMs = clampPositiveInt(options?.timeWindowMs, DEFAULT_LOG_CONTEXT_WINDOW_MS, MAX_LOG_CONTEXT_WINDOW_MS);
@@ -557,6 +556,7 @@ export class VictoriaLogsDatasource
     direction: LogRowContextQueryDirection
   ): boolean => {
     const isForwardDirection = direction === LogRowContextQueryDirection.Forward;
+    const rowTimestampSec = Math.trunc(rowTimeEpochMs / 1000);
 
     for (const frame of frames) {
       const timeField = frame.fields.find((field) => field.type === FieldType.time);
@@ -574,6 +574,7 @@ export class VictoriaLogsDatasource
         }
 
         let timestampMs: number;
+        let isSecondPrecisionTimestamp = false;
         if (rawValue instanceof Date) {
           timestampMs = rawValue.valueOf();
         } else {
@@ -582,12 +583,22 @@ export class VictoriaLogsDatasource
             continue;
           }
 
-          timestampMs =
-            numericValue > 1e14
-              ? Math.trunc(numericValue / 1e6)
-              : numericValue > 1e11
-                ? Math.trunc(numericValue)
-                : Math.trunc(numericValue * 1000);
+          if (numericValue > 1e14) {
+            timestampMs = Math.trunc(numericValue / 1e6);
+          } else if (numericValue > 1e11) {
+            timestampMs = Math.trunc(numericValue);
+          } else {
+            timestampMs = Math.trunc(numericValue * 1000);
+            isSecondPrecisionTimestamp = true;
+          }
+        }
+
+        if (isSecondPrecisionTimestamp) {
+          const timestampSec = Math.trunc(timestampMs / 1000);
+          if (isForwardDirection ? timestampSec > rowTimestampSec : timestampSec < rowTimestampSec) {
+            return true;
+          }
+          continue;
         }
 
         if (isForwardDirection ? timestampMs > rowTimeEpochMs : timestampMs < rowTimeEpochMs) {
@@ -599,9 +610,9 @@ export class VictoriaLogsDatasource
     return false;
   };
 
-  private getLogContextSourceExpr = (row: LogRowModel, query?: Query): string | undefined => {
-    if (query?.expr?.trim()) {
-      return query.expr;
+  private getLogContextSourceExpr = (row: LogRowModel, query?: DataQuery): string | undefined => {
+    if (typeof (query as Query | undefined)?.expr === 'string' && (query as Query).expr.trim()) {
+      return (query as Query).expr;
     }
 
     const sourceQuery = (row.dataFrame.meta?.custom as { sourceQuery?: Partial<Query> } | undefined)?.sourceQuery;
@@ -610,29 +621,6 @@ export class VictoriaLogsDatasource
     }
 
     return undefined;
-  };
-
-  private getLogContextStreamId = (row: LogRowModel): string | undefined => {
-    const streamIds = (row.dataFrame.meta?.custom as { streamIds?: string[] } | undefined)?.streamIds;
-    const streamIdFromMeta = Array.isArray(streamIds) ? streamIds[row.rowIndex] : undefined;
-
-    if (typeof streamIdFromMeta === 'string' && streamIdFromMeta.trim()) {
-      return streamIdFromMeta;
-    }
-
-    const streamIdFromLabels = row.labels[LABEL_STREAM_ID];
-    if (streamIdFromLabels) {
-      return streamIdFromLabels;
-    }
-
-    const transformedLabels: Labels = {};
-    Object.values(row.labels).forEach((label) => {
-      const [key, value] = label.split(':');
-      const cleanedKey = key.trim();
-      transformedLabels[cleanedKey] = value.trim().replace(/"/g, '');
-    });
-
-    return transformedLabels[LABEL_STREAM_ID];
   };
 
   private getLogContextSearchWords = (row: LogRowModel): string[] | undefined => {
@@ -674,7 +662,7 @@ export class VictoriaLogsDatasource
   };
 
   private getContextFilterFieldsToRemove = (): Set<string> => {
-    const fields = new Set<string>(['_stream_id', 'level']);
+    const fields = new Set<string>(['_stream_id', 'level', 'detected_level']);
 
     for (const rule of this.getActiveLevelRules()) {
       const normalizedField = rule.field?.trim().replace(/^"|"$/g, '').toLowerCase();
@@ -831,16 +819,7 @@ export class VictoriaLogsDatasource
     return queryParts.length > 0 ? queryParts.join(' | ') : '*';
   };
 
-  private addContextStreamFilter = (expr: string, streamId?: string): string => {
-    if (!streamId?.trim()) {
-      return expr;
-    }
-
-    const baseExpr = expr.trim() === '*' ? '' : expr;
-    return addLabelToQuery(baseExpr, { key: LABEL_STREAM_ID, value: streamId, operator: '' });
-  };
-
-  private makeLogContextDataRequest = (row: LogRowModel, options?: LogRowContextOptions, sourceQuery?: Query): DataQueryRequest<Query> => {
+  private makeLogContextDataRequest = (row: LogRowModel, options?: LogRowContextOptions, sourceQuery?: DataQuery): DataQueryRequest<Query> => {
     const direction = options?.direction || LogRowContextQueryDirection.Backward;
 
     const contextMaxLines = clampPositiveInt(options?.limit, DEFAULT_LOG_CONTEXT_MAX_LINES, MAX_LOG_CONTEXT_MAX_LINES);
@@ -850,12 +829,12 @@ export class VictoriaLogsDatasource
       ? this.interpolateString(contextSourceExpr, options?.scopedVars)
       : undefined;
 
-    const streamId = this.getLogContextStreamId(row);
-    const contextExpr = this.addContextStreamFilter(this.prepareLogContextQueryExpr(interpolatedExpr), streamId);
+    const contextExpr = this.prepareLogContextQueryExpr(interpolatedExpr);
+    const contextCursorKey = `${row.dataFrame.refId}-${row.rowIndex}-${row.timeEpochMs}-${direction}-${contextWindowMs}`;
 
     const query: Query = {
       expr: contextExpr,
-      refId: `${REF_ID_STARTER_LOG_CONTEXT_QUERY}${row.dataFrame.refId}-${options?.direction}`,
+      refId: `${REF_ID_STARTER_LOG_CONTEXT_QUERY}${contextCursorKey}`,
       maxLines: contextMaxLines,
     };
 
@@ -868,7 +847,7 @@ export class VictoriaLogsDatasource
       interval: interval.interval,
       intervalMs: interval.intervalMs,
       range: range,
-      requestId: `${REF_ID_STARTER_LOG_CONTEXT_REQUEST}${row.dataFrame.refId}-${options?.direction}`,
+      requestId: `${REF_ID_STARTER_LOG_CONTEXT_REQUEST}${contextCursorKey}`,
       scopedVars: options?.scopedVars || {},
       startTime: Date.now(),
       targets: [query],
@@ -878,17 +857,16 @@ export class VictoriaLogsDatasource
 
   private createContextTimeRange = (rowTimeEpochMs: number, direction?: LogRowContextQueryDirection, windowMs = DEFAULT_LOG_CONTEXT_WINDOW_MS): TimeRange => {
     const offset = windowMs;
-    const overlap = 1000;
 
     const timeRange =
       direction === LogRowContextQueryDirection.Backward
         ? {
           from: toUtc(rowTimeEpochMs - offset),
-          to: toUtc(rowTimeEpochMs + overlap)
+          to: toUtc(rowTimeEpochMs - 1)
         }
         : {
-          from: toUtc(rowTimeEpochMs),
-          to: toUtc(rowTimeEpochMs + offset) // Add 1 second to avoid missing results
+          from: toUtc(rowTimeEpochMs + 1),
+          to: toUtc(rowTimeEpochMs + offset)
         };
 
     return { ...timeRange, raw: timeRange };

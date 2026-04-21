@@ -31,10 +31,25 @@ export const useLogsSort = (
 
   useEffect(() => {
     // grafana with a version below 12 doesn't support subscribe function on store
-    if ('subscribe' in store) {
-      store.subscribe(storeKeys.LOGS_SORT_ORDER, () => {
-        onRunQuery();
-      });
+    if (!('subscribe' in store)) {
+      return;
     }
+
+    let lastSortOrder = store.get(storeKeys.LOGS_SORT_ORDER);
+    const unsubscribe = store.subscribe(storeKeys.LOGS_SORT_ORDER, () => {
+      const nextSortOrder = store.get(storeKeys.LOGS_SORT_ORDER);
+      if (nextSortOrder === lastSortOrder) {
+        return;
+      }
+
+      lastSortOrder = nextSortOrder;
+      onRunQuery();
+    });
+
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, [onRunQuery]);
 };

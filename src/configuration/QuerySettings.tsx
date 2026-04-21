@@ -16,7 +16,7 @@ export const QuerySettings = (props: Props) => {
         labelWidth={28}
         tooltip={
           <>
-            VictoriaLogs queries must contain a limit of the maximum number of lines returned (default: 1000). Increase this
+            VictoriaLogs queries must contain a limit of the maximum number of lines returned (default: 500). Increase this
             limit to have a bigger result set for ad-hoc analysis. Decrease this limit if your browser becomes sluggish
             when displaying the log results.
           </>
@@ -27,7 +27,7 @@ export const QuerySettings = (props: Props) => {
           type='number'
           value={maxLines}
           onChange={(event: React.FormEvent<HTMLInputElement>) => onMaxLinedChange(event.currentTarget.value)}
-          placeholder='1000'
+          placeholder='500'
           spellCheck={false}
         />
       </InlineField>

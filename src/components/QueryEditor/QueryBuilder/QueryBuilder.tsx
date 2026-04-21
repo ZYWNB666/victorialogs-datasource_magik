@@ -23,16 +23,6 @@ interface Props {
 
 const MsgFilterConditionTypeOptions = [
   {
-    label: 'Line contains',
-    value: LineFilterType.Contains,
-    description: '精确包含（区分大小写）→ _msg:"text"',
-  },
-  {
-    label: 'Line does not contain',
-    value: LineFilterType.NotContains,
-    description: '精确不包含（区分大小写）→ _msg:!"text"',
-  },
-  {
     label: 'Line contains case insensitive',
     value: LineFilterType.ContainsCaseInsensitive,
     description: '包含（不区分大小写）→ _msg:~"(?i)text"',
@@ -57,6 +47,16 @@ const MsgFilterConditionTypeOptions = [
     value: LineFilterType.IpFilter,
     description: 'IP 地址过滤 → _msg:ip("ip_range")',
   },
+  {
+    label: 'Line contains',
+    value: LineFilterType.Contains,
+    description: '精确包含（区分大小写）→ _msg:"text"',
+  },
+  {
+    label: 'Line does not contain',
+    value: LineFilterType.NotContains,
+    description: '精确不包含（区分大小写）→ _msg:!"text"',
+  },
 ];
 
 const MsgFilterOperatorOptions = BUILDER_OPERATORS.map((operator) => ({
@@ -78,7 +78,7 @@ const QueryBuilder = memo<Props>(({ datasource, query, onChange, timeRange }) =>
   };
 
   const handleAddMsgFilter = useCallback(() => {
-    const newMsgFilters = [...(msgFilters || []), { text: '', type: LineFilterType.Contains }];
+    const newMsgFilters = [...(msgFilters || []), { text: '', type: LineFilterType.ContainsCaseInsensitive }];
     const newOperators = normalizeOperatorsLength([...(query.msgFilterOperators || []), DEFAULT_FILTER_OPERATOR], newMsgFilters.length);
     onChange({ ...query, msgFilters: newMsgFilters, msgFilterOperators: newOperators });
   }, [onChange, query, msgFilters]);
@@ -123,7 +123,7 @@ const QueryBuilder = memo<Props>(({ datasource, query, onChange, timeRange }) =>
   }, [onChange, query, msgFilters]);
 
   // Ensure at least one msgFilter is displayed (like Loki does by default)
-  const displayFilters = (msgFilters && msgFilters.length > 0) ? msgFilters : [{ text: '', type: LineFilterType.Contains }];
+  const displayFilters = (msgFilters && msgFilters.length > 0) ? msgFilters : [{ text: '', type: LineFilterType.ContainsCaseInsensitive }];
   const hasActualFilters = msgFilters && msgFilters.length > 0;
   const displayOperators = normalizeOperatorsLength(query.msgFilterOperators || [], displayFilters.length);
 
@@ -183,7 +183,7 @@ const QueryBuilder = memo<Props>(({ datasource, query, onChange, timeRange }) =>
                   onChange={(e) => {
                     if (!hasActualFilters && index === 0) {
                       // First interaction - create the actual filter
-                      onChange({ ...query, msgFilters: [{ text: e.currentTarget.value, type: filter.type || LineFilterType.Contains }], msgFilterOperators: [] });
+                      onChange({ ...query, msgFilters: [{ text: e.currentTarget.value, type: filter.type || LineFilterType.ContainsCaseInsensitive }], msgFilterOperators: [] });
                     } else {
                       handleMsgFilterTextChange(index, e.currentTarget.value);
                     }

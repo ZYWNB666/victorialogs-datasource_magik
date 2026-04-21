@@ -1,11 +1,12 @@
 import { of } from 'rxjs';
 
-import { AdHocVariableFilter, LogRowContextQueryDirection } from '@grafana/data';
+import { AdHocVariableFilter, LogLevel, LogRowContextQueryDirection } from '@grafana/data';
 import { TemplateSrv } from '@grafana/runtime';
 
 // eslint-disable-next-line jest/no-mocks-import
 import { createDatasource } from './__mocks__/datasource';
 import { VARIABLE_ALL_VALUE } from './constants';
+import { LogLevelRuleType } from './configuration/LogLevelRules/types';
 import {
   DEFAULT_LOG_CONTEXT_MAX_LINES,
   DEFAULT_LOG_CONTEXT_WINDOW_MS,
@@ -13,6 +14,8 @@ import {
   MAX_LOG_CONTEXT_MAX_LINES,
   MAX_LOG_CONTEXT_WINDOW_MS,
   MAX_QUERY_MAX_LINES,
+  REF_ID_STARTER_LOG_CONTEXT_QUERY,
+  REF_ID_STARTER_LOG_CONTEXT_REQUEST,
   VictoriaLogsDatasource,
 } from './datasource';
 
@@ -73,8 +76,8 @@ describe('VictoriaLogsDatasource', () => {
       const request = (ds as any).makeLogContextDataRequest(row);
 
       expect(request.targets[0].maxLines).toBe(DEFAULT_LOG_CONTEXT_MAX_LINES);
-      expect(request.range.to.valueOf()).toBe(row.timeEpochMs + 1000);
       expect(request.range.from.valueOf()).toBe(row.timeEpochMs - DEFAULT_LOG_CONTEXT_WINDOW_MS);
+      expect(request.range.to.valueOf()).toBe(row.timeEpochMs - 1);
     });
 
     it('should clamp context request limit and time window from options', () => {
@@ -86,8 +89,32 @@ describe('VictoriaLogsDatasource', () => {
       });
 
       expect(request.targets[0].maxLines).toBe(MAX_LOG_CONTEXT_MAX_LINES);
-      expect(request.range.from.valueOf()).toBe(row.timeEpochMs);
+      expect(request.range.from.valueOf()).toBe(row.timeEpochMs + 1);
       expect(request.range.to.valueOf()).toBe(row.timeEpochMs + MAX_LOG_CONTEXT_WINDOW_MS);
+    });
+
+    it('should generate unique context request and query ids for different cursors', () => {
+      const rowA = makeRow(1_700_000_000_000);
+      const rowB = {
+        ...makeRow(1_700_000_001_000),
+        rowIndex: 5,
+      } as any;
+
+      const requestA = (ds as any).makeLogContextDataRequest(rowA, {
+        direction: LogRowContextQueryDirection.Backward,
+        timeWindowMs: 60_000,
+      });
+      const requestB = (ds as any).makeLogContextDataRequest(rowB, {
+        direction: LogRowContextQueryDirection.Backward,
+        timeWindowMs: 120_000,
+      });
+
+      expect(requestA.requestId).toContain(REF_ID_STARTER_LOG_CONTEXT_REQUEST);
+      expect(requestA.targets[0].refId).toContain(REF_ID_STARTER_LOG_CONTEXT_QUERY);
+      expect(requestA.requestId).not.toBe(requestB.requestId);
+      expect(requestA.targets[0].refId).not.toBe(requestB.targets[0].refId);
+      expect(requestA.requestId).not.toContain('undefined');
+      expect(requestA.targets[0].refId).not.toContain('undefined');
     });
   });
 
@@ -415,7 +442,11 @@ describe('VictoriaLogsDatasource', () => {
 
       expect(runQuerySpy).toHaveBeenCalledTimes(2);
       expect(runQuerySpy.mock.calls[0][0].range.from.valueOf()).toBe(row.timeEpochMs - 60_000);
+      expect(runQuerySpy.mock.calls[0][0].range.to.valueOf()).toBe(row.timeEpochMs - 1);
       expect(runQuerySpy.mock.calls[1][0].range.from.valueOf()).toBe(row.timeEpochMs - MAX_LOG_CONTEXT_WINDOW_MS);
+      expect(runQuerySpy.mock.calls[1][0].range.to.valueOf()).toBe(row.timeEpochMs - 1);
+      expect(runQuerySpy.mock.calls[0][0].requestId).not.toBe(runQuerySpy.mock.calls[1][0].requestId);
+      expect(runQuerySpy.mock.calls[0][0].targets[0].refId).not.toBe(runQuerySpy.mock.calls[1][0].targets[0].refId);
     });
 
     it('should not retry when directional rows are already present', async () => {
@@ -442,19 +473,40 @@ describe('VictoriaLogsDatasource', () => {
       expect(runQuerySpy).toHaveBeenCalledTimes(1);
     });
 
-    it('should detect forward directional rows and skip retry', async () => {
-      const row = makeRow();
-      const runQuerySpy = jest.spyOn(ds, 'runQuery').mockReturnValue(makeResponseObservable([row.timeEpochMs + 1]));
+    it('should treat same-second second-precision values as non-directional for forward requests', async () => {
+      const row = makeRow(1_700_000_000_500);
+      const sameSecond = Math.trunc(row.timeEpochMs / 1000);
+      const runQuerySpy = jest
+        .spyOn(ds, 'runQuery')
+        .mockReturnValueOnce(makeResponseObservable([sameSecond]))
+        .mockReturnValueOnce(makeResponseObservable([sameSecond + 1]));
 
       await ds.getLogRowContext(row, {
         direction: LogRowContextQueryDirection.Forward,
         timeWindowMs: 60_000,
       });
 
-      expect(runQuerySpy).toHaveBeenCalledTimes(1);
+      expect(runQuerySpy).toHaveBeenCalledTimes(2);
     });
 
-    it('should preserve non-level filters and add _stream_id filter to context query', async () => {
+    it('should treat same-second second-precision values as non-directional for backward requests', async () => {
+      const row = makeRow(1_700_000_000_500);
+      const sameSecond = Math.trunc(row.timeEpochMs / 1000);
+      const runQuerySpy = jest
+        .spyOn(ds, 'runQuery')
+        .mockReturnValueOnce(makeResponseObservable([sameSecond]))
+        .mockReturnValueOnce(makeResponseObservable([sameSecond - 1]));
+
+      await ds.getLogRowContext(row, {
+        direction: LogRowContextQueryDirection.Backward,
+        timeWindowMs: 60_000,
+      });
+
+      expect(runQuerySpy).toHaveBeenCalledTimes(2);
+    });
+
+
+    it('should preserve non-level filters while removing _stream_id and level filters from context query', async () => {
       const row = makeRow();
       const runQuerySpy = jest.spyOn(ds, 'runQuery').mockReturnValue(makeResponseObservable([row.timeEpochMs - 1]));
 
@@ -470,10 +522,10 @@ describe('VictoriaLogsDatasource', () => {
         } as any
       );
 
-      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('pod:~"api.*" AND _stream_id:stream-id-1 | stats count()');
+      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('pod:~"api.*" | stats count()');
     });
 
-    it('should keep _stream_id filter while removing msg and level filters from context query', async () => {
+    it('should remove msg and level filters from context query', async () => {
       const row = makeRow();
       const runQuerySpy = jest.spyOn(ds, 'runQuery').mockReturnValue(makeResponseObservable([row.timeEpochMs - 1]));
 
@@ -489,7 +541,25 @@ describe('VictoriaLogsDatasource', () => {
         } as any
       );
 
-      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('app:="frontend" AND _stream_id:stream-id-1 | stats count()');
+      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('app:="frontend" | stats count()');
+    });
+    it('should remove detected_level filter from context query', async () => {
+      const row = makeRow();
+      const runQuerySpy = jest.spyOn(ds, 'runQuery').mockReturnValue(makeResponseObservable([row.timeEpochMs - 1]));
+
+      await ds.getLogRowContext(
+        row,
+        {
+          direction: LogRowContextQueryDirection.Backward,
+          timeWindowMs: 60_000,
+        },
+        {
+          refId: 'A',
+          expr: 'detected_level:="error" AND app:="frontend"',
+        } as any
+      );
+
+      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('app:="frontend"');
     });
 
     it('should remove filters based on active custom level rule fields', async () => {
@@ -499,9 +569,9 @@ describe('VictoriaLogsDatasource', () => {
           logLevelRules: [
             {
               field: 'severity_text',
-              operator: 'equals',
+              operator: LogLevelRuleType.Equals,
               value: 'ERROR',
-              level: 'error',
+              level: LogLevel.error,
               enabled: true,
             },
           ],
@@ -522,9 +592,8 @@ describe('VictoriaLogsDatasource', () => {
         } as any
       );
 
-      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('app:="frontend" AND _stream_id:stream-id-1');
+      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('app:="frontend"');
     });
-
 
     it('should preserve source searchWords on context response frames', async () => {
       const row = makeRow(1_700_000_000_000, undefined, ['error', 'warn']);
@@ -574,7 +643,7 @@ describe('VictoriaLogsDatasource', () => {
       expect(response.data[0].meta?.searchWords).toEqual(['fallback']);
     });
 
-    it('should add _stream_id filter when source query comes from frame metadata', async () => {
+    it('should not enforce _stream_id filter when source query comes from frame metadata', async () => {
       const row = makeRow(1_700_000_000_000, 'level:contains_common_case("info") AND env:="prod"');
       const runQuerySpy = jest.spyOn(ds, 'runQuery').mockReturnValue(makeResponseObservable([row.timeEpochMs - 1]));
 
@@ -583,10 +652,10 @@ describe('VictoriaLogsDatasource', () => {
         timeWindowMs: 60_000,
       });
 
-      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('env:="prod" AND _stream_id:stream-id-1');
+      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('env:="prod"');
     });
 
-    it('should keep _stream_id-only context query when only removed filters remain', async () => {
+    it('should fallback to wildcard context query when only excluded filters remain', async () => {
       const row = makeRow();
       const runQuerySpy = jest.spyOn(ds, 'runQuery').mockReturnValue(makeResponseObservable([row.timeEpochMs - 1]));
 
@@ -602,7 +671,7 @@ describe('VictoriaLogsDatasource', () => {
         } as any
       );
 
-      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('_stream_id:stream-id-1');
+      expect(runQuerySpy.mock.calls[0][0].targets[0].expr).toBe('*');
     });
   });
 

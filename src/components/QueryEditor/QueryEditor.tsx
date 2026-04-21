@@ -15,7 +15,6 @@ import { EditorHeader } from './EditorHeader';
 import { LogsQLSyntaxHelp } from './LogsQLSyntaxHelp';
 import { QueryBuilderContainer } from './QueryBuilder/QueryBuilderContainer';
 import { QueryEditorModeToggle } from './QueryBuilder/QueryEditorModeToggle';
-import { StreamFilters } from './QueryBuilder/components/StreamFilters/StreamFilters';
 import { buildVisualQueryFromString } from './QueryBuilder/utils/parseFromString';
 import QueryCodeEditor from './QueryCodeEditor';
 import { QueryEditorHelp } from './QueryEditorHelp';

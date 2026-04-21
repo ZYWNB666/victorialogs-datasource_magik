@@ -78,7 +78,7 @@ func TestQuery_getQueryURL(t *testing.T) {
 		},
 		QueryType: QueryTypeInstant,
 		rawURL:    "http://127.0.0.1:9428",
-		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=1000&query=&start=1609459200",
+		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=500&query=&start=1609459200",
 	}
 	f(o)
 
@@ -109,33 +109,34 @@ func TestQuery_getQueryURL(t *testing.T) {
 	}
 	f(o)
 
-	// has expression and max lines
+
+	// context instant query should use millisecond start/end to avoid second-level cursor collapse
+	o = opts{
+		RefID:    "log-context-query-A-0-1609459200123-Backward-60000",
+		Expr:     "_time:1s",
+		MaxLines: 0,
+		TimeRange: backend.TimeRange{
+			From: time.Date(2021, 1, 1, 0, 0, 0, 123000000, time.UTC),
+			To:   time.Date(2021, 1, 1, 1, 0, 0, 987000000, time.UTC),
+		},
+		QueryType: QueryTypeInstant,
+		rawURL:    "http://127.0.0.1:9428",
+		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800987&limit=100&query=_time%3A1s&start=1609459200123",
+	}
+	f(o)
+
+	// regular instant query should keep second-level start/end for compatibility
 	o = opts{
 		RefID:    "1",
 		Expr:     "_time:1s",
 		MaxLines: 10,
 		TimeRange: backend.TimeRange{
-			From: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
-			To:   time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC),
+			From: time.Date(2021, 1, 1, 0, 0, 0, 123000000, time.UTC),
+			To:   time.Date(2021, 1, 1, 1, 0, 0, 987000000, time.UTC),
 		},
 		QueryType: QueryTypeInstant,
 		rawURL:    "http://127.0.0.1:9428",
 		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=10&query=_time%3A1s&start=1609459200",
-	}
-	f(o)
-
-	// clamps max lines for regular instant query
-	o = opts{
-		RefID:    "1",
-		Expr:     "_time:1s",
-		MaxLines: 20000,
-		TimeRange: backend.TimeRange{
-			From: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
-			To:   time.Date(2021, 1, 1, 1, 0, 0, 0, time.UTC),
-		},
-		QueryType: QueryTypeInstant,
-		rawURL:    "http://127.0.0.1:9428",
-		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=10000&query=_time%3A1s&start=1609459200",
 	}
 	f(o)
 
@@ -150,7 +151,7 @@ func TestQuery_getQueryURL(t *testing.T) {
 		},
 		QueryType: QueryTypeInstant,
 		rawURL:    "http://127.0.0.1:9428",
-		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=100&query=_time%3A1s&start=1609459200",
+		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800000&limit=100&query=_time%3A1s&start=1609459200000",
 	}
 	f(o)
 
@@ -165,7 +166,7 @@ func TestQuery_getQueryURL(t *testing.T) {
 		},
 		QueryType: QueryTypeInstant,
 		rawURL:    "http://127.0.0.1:9428",
-		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800&limit=1000&query=_time%3A1s&start=1609459200",
+		want:      "http://127.0.0.1:9428/select/logsql/query?end=1609462800000&limit=1000&query=_time%3A1s&start=1609459200000",
 	}
 	f(o)
 
